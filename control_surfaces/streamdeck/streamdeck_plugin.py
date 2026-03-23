@@ -404,13 +404,13 @@ class StreamDeckPlugin:
         # Get press binding
         bindings = assignment.get("bindings", {})
         press = bindings.get("press") if isinstance(bindings, dict) else None
-        hold_binding = bindings.get("hold") if isinstance(bindings, dict) else None
+        feedback = bindings.get("feedback") if isinstance(bindings, dict) else None
 
         # Backward compat
         if not press and assignment.get("macro_id"):
             press = {"action": "macro", "macro": assignment["macro_id"]}
 
-        if not press:
+        if not press or not isinstance(press, dict):
             return
 
         mode = press.get("mode", "tap")
@@ -433,26 +433,33 @@ class StreamDeckPlugin:
         if mode == "toggle":
             if not pressed:
                 return
-            # Toggle: track on/off state per button, alternate action
-            toggle_key = f"_toggle_{page}_{key_index}"
-            is_on = getattr(self, toggle_key, False)
-            if is_on and hold_binding:
-                # "hold" binding used as the "off" action for toggle
-                await self._execute_action(hold_binding, key_index)
+            # Toggle: read feedback state to determine on/off
+            off_action = press.get("off_action")
+            is_active = False
+            if feedback and isinstance(feedback, dict):
+                fk = feedback.get("key", "")
+                if fk:
+                    value = await self.api.state_get(fk)
+                    condition = feedback.get("condition", {})
+                    expected = condition.get("equals") if isinstance(condition, dict) else None
+                    is_active = (str(value).lower() == str(expected).lower()) if expected is not None else bool(value)
+
+            if is_active and off_action and isinstance(off_action, dict):
+                await self._execute_action(off_action, key_index)
             else:
                 await self._execute_action(press, key_index)
-            setattr(self, toggle_key, not is_on)
             return
 
         if mode == "tap_hold":
             threshold = press.get("hold_threshold_ms", 500) / 1000.0
+            hold_action = press.get("hold_action")
             if pressed:
                 self._press_times[key_index] = asyncio.get_event_loop().time()
             else:
                 press_time = self._press_times.pop(key_index, 0)
                 held = asyncio.get_event_loop().time() - press_time
-                if held >= threshold and hold_binding:
-                    await self._execute_action(hold_binding, key_index)
+                if held >= threshold and hold_action and isinstance(hold_action, dict):
+                    await self._execute_action(hold_action, key_index)
                 else:
                     await self._execute_action(press, key_index)
             return
