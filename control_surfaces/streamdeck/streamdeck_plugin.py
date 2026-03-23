@@ -157,6 +157,7 @@ class StreamDeckPlugin:
             "event_emit",
             "event_subscribe",
             "macro_execute",
+            "device_command",
             "usb_access",
         ],
     }
@@ -386,41 +387,67 @@ class StreamDeckPlugin:
 
     async def _on_key_change(self, deck, key_index, pressed):
         """Handle a physical button press/release."""
-        row = key_index // (self._get_columns())
-        col = key_index % (self._get_columns())
         page = self.current_page
 
         event_type = "press" if pressed else "release"
         await self.api.event_emit(
             f"button.{event_type}",
-            {"key": key_index, "row": row, "col": col, "page": page},
+            {"key": key_index, "page": page},
         )
 
         if not pressed:
             return
 
         # Look up the button assignment for this key on the current page
-        assignment = self._get_button_assignment(page, row, col)
+        assignment = self._get_button_assignment(page, key_index)
         if not assignment:
             return
 
-        # Special actions
-        action = assignment.get("action")
-        if action == "next_page":
-            await self._change_page(self.current_page + 1)
-            return
-        elif action == "prev_page":
-            await self._change_page(self.current_page - 1)
+        # Get press action from bindings (new format) or legacy macro_id
+        bindings = assignment.get("bindings", {})
+        press = bindings.get("press") if isinstance(bindings, dict) else None
+
+        # Backward compat: old macro_id field
+        if not press and assignment.get("macro_id"):
+            press = {"action": "macro", "macro": assignment["macro_id"]}
+
+        if not press:
             return
 
-        # Execute macro
-        macro = assignment.get("macro")
-        if macro:
-            try:
-                await self.api.macro_execute(macro)
-                self.api.log(f"Executed macro '{macro}' from key {key_index}", level="debug")
-            except Exception as e:
-                self.api.log(f"Error executing macro '{macro}': {e}", level="error")
+        action = press.get("action", "")
+
+        # Page navigation
+        if action == "navigate":
+            page_id = press.get("page", "")
+            if page_id == "__next_page__":
+                await self._change_page(self.current_page + 1)
+            elif page_id == "__prev_page__":
+                await self._change_page(self.current_page - 1)
+            return
+
+        # Macro execution
+        if action == "macro":
+            macro = press.get("macro", "")
+            if macro:
+                try:
+                    await self.api.macro_execute(macro)
+                    self.api.log(f"Executed macro '{macro}' from key {key_index}", level="debug")
+                except Exception as e:
+                    self.api.log(f"Error executing macro '{macro}': {e}", level="error")
+            return
+
+        # Device command
+        if action == "device.command":
+            device = press.get("device", "")
+            command = press.get("command", "")
+            params = press.get("params")
+            if device and command:
+                try:
+                    await self.api.device_command(device, command, params if isinstance(params, dict) else None)
+                    self.api.log(f"Sent {command} to {device} from key {key_index}", level="debug")
+                except Exception as e:
+                    self.api.log(f"Error sending command: {e}", level="error")
+            return
 
     # ──── Page Navigation ────
 
@@ -456,25 +483,48 @@ class StreamDeckPlugin:
         if not self.deck or not self.deck.is_visual():
             return
 
-        columns = self._get_columns()
-        row = key_index // columns
-        col = key_index % columns
-        assignment = self._get_button_assignment(self.current_page, row, col)
+        assignment = self._get_button_assignment(self.current_page, key_index)
 
+        default_bg = self.api.config.get("button_color", "#1a1a2e")
+        default_text = self.api.config.get("text_color", "#e0e0e0")
         label = ""
-        bg_color = self.api.config.get("button_color", "#1a1a2e")
-        text_color = self.api.config.get("text_color", "#e0e0e0")
+        bg_color = default_bg
+        text_color = default_text
 
         if assignment:
             label = assignment.get("label", "")
 
-            # Check feedback key for active state
-            feedback_key = assignment.get("feedback_key")
-            if feedback_key:
-                value = await self.api.state_get(feedback_key)
-                is_active = bool(value) and value not in (None, 0, "", "off", "false", False)
-                if is_active:
-                    bg_color = self.api.config.get("active_color", "#0f3460")
+            # Read feedback from bindings (new) or legacy feedback_key
+            bindings = assignment.get("bindings", {})
+            feedback = bindings.get("feedback") if isinstance(bindings, dict) else None
+
+            # Backward compat
+            if not feedback and assignment.get("feedback_key"):
+                feedback = {
+                    "source": "state", "key": assignment["feedback_key"],
+                    "condition": {"equals": True},
+                    "style_active": {"bg_color": self.api.config.get("active_color", "#0f3460")},
+                    "style_inactive": {},
+                }
+
+            if feedback and isinstance(feedback, dict):
+                fk = feedback.get("key", "")
+                condition = feedback.get("condition", {})
+                style_active = feedback.get("style_active", {})
+                style_inactive = feedback.get("style_inactive", {})
+
+                if fk:
+                    value = await self.api.state_get(fk)
+                    expected = condition.get("equals") if isinstance(condition, dict) else None
+                    # Loose comparison (same as web UI panel)
+                    is_active = (str(value).lower() == str(expected).lower()) if expected is not None else bool(value)
+
+                    if is_active and isinstance(style_active, dict):
+                        bg_color = style_active.get("bg_color", bg_color)
+                        text_color = style_active.get("text_color", text_color)
+                    elif not is_active and isinstance(style_inactive, dict):
+                        bg_color = style_inactive.get("bg_color", bg_color) or default_bg
+                        text_color = style_inactive.get("text_color", text_color) or default_text
 
         # Generate the button image
         image = self._create_button_image(label, bg_color, text_color)
@@ -518,21 +568,24 @@ class StreamDeckPlugin:
     # ──── State Feedback ────
 
     async def _setup_feedback_subscriptions(self):
-        """Subscribe to state keys referenced by button feedback_key fields."""
-        pages = self.api.config.get("pages", {})
+        """Subscribe to state keys referenced by button feedback bindings."""
+        buttons = self.api.config.get("buttons", [])
         feedback_keys = set()
 
-        for page_id, page_data in pages.items():
-            if not isinstance(page_data, dict):
+        for btn in buttons:
+            if not isinstance(btn, dict):
                 continue
-            for pos_key, assignment in page_data.items():
-                if not isinstance(assignment, dict):
-                    continue
-                fk = assignment.get("feedback_key")
-                if fk:
-                    feedback_keys.add(fk)
+            # New format: bindings.feedback.key
+            bindings = btn.get("bindings", {})
+            if isinstance(bindings, dict):
+                feedback = bindings.get("feedback", {})
+                if isinstance(feedback, dict) and feedback.get("key"):
+                    feedback_keys.add(feedback["key"])
+            # Legacy format
+            fk = btn.get("feedback_key")
+            if fk:
+                feedback_keys.add(fk)
 
-        # Subscribe to each unique feedback key pattern
         for key in feedback_keys:
             sub_id = await self.api.state_subscribe(key, self._on_feedback_state_change)
             self._feedback_subs.append(sub_id)
@@ -542,20 +595,28 @@ class StreamDeckPlugin:
         if not self.deck or not self.deck.is_visual():
             return
 
-        columns = self._get_columns()
-        page_data = self.api.config.get("pages", {}).get(str(self.current_page), {})
-
-        for pos_key, assignment in page_data.items():
-            if not isinstance(assignment, dict):
+        buttons = self.api.config.get("buttons", [])
+        for btn in buttons:
+            if not isinstance(btn, dict):
                 continue
-            if assignment.get("feedback_key") == key:
-                try:
-                    parts = pos_key.split(",")
-                    row, col = int(parts[0]), int(parts[1])
-                    key_index = row * columns + col
+            if btn.get("page", 0) != self.current_page:
+                continue
+
+            # Check new bindings format
+            bindings = btn.get("bindings", {})
+            fk = None
+            if isinstance(bindings, dict):
+                feedback = bindings.get("feedback", {})
+                if isinstance(feedback, dict):
+                    fk = feedback.get("key")
+            # Legacy
+            if not fk:
+                fk = btn.get("feedback_key")
+
+            if fk == key:
+                key_index = btn.get("index")
+                if key_index is not None:
                     await self._render_button(key_index)
-                except (ValueError, IndexError):
-                    pass
 
     # ──── Context Actions ────
 
@@ -600,14 +661,14 @@ class StreamDeckPlugin:
                 return layout[1]  # (rows, cols)
         return 4  # default for Neo
 
-    def _get_button_assignment(self, page, row, col):
-        """Look up the button assignment for a specific page/position."""
-        pages = self.api.config.get("pages", {})
-        page_data = pages.get(str(page), {})
-        pos_key = f"{row},{col}"
-        assignment = page_data.get(pos_key)
-        if isinstance(assignment, dict):
-            return assignment
+    def _get_button_assignment(self, page, key_index):
+        """Look up the button assignment for a specific page/key index."""
+        buttons = self.api.config.get("buttons", [])
+        for btn in buttons:
+            if not isinstance(btn, dict):
+                continue
+            if btn.get("index") == key_index and btn.get("page", 0) == page:
+                return btn
         return None
 
     def _log_hidapi_help(self):
