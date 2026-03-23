@@ -263,6 +263,8 @@ class StreamDeckPlugin:
         self._feedback_subs = []
         self._loop = None
         self._model_info = None
+        self._hold_tasks = {}    # key_index -> periodic task ID for hold-repeat
+        self._press_times = {}   # key_index -> timestamp for tap/hold mode
 
     async def start(self, api):
         """Initialize and connect to the Stream Deck."""
@@ -386,7 +388,7 @@ class StreamDeckPlugin:
     # ──── Key Handling ────
 
     async def _on_key_change(self, deck, key_index, pressed):
-        """Handle a physical button press/release."""
+        """Handle a physical button press/release with mode support."""
         page = self.current_page
 
         event_type = "press" if pressed else "release"
@@ -395,59 +397,100 @@ class StreamDeckPlugin:
             {"key": key_index, "page": page},
         )
 
-        if not pressed:
-            return
-
-        # Look up the button assignment for this key on the current page
         assignment = self._get_button_assignment(page, key_index)
         if not assignment:
             return
 
-        # Get press action from bindings (new format) or legacy macro_id
+        # Get press binding
         bindings = assignment.get("bindings", {})
         press = bindings.get("press") if isinstance(bindings, dict) else None
+        hold_binding = bindings.get("hold") if isinstance(bindings, dict) else None
 
-        # Backward compat: old macro_id field
+        # Backward compat
         if not press and assignment.get("macro_id"):
             press = {"action": "macro", "macro": assignment["macro_id"]}
 
         if not press:
             return
 
-        action = press.get("action", "")
+        mode = press.get("mode", "tap")
 
-        # Page navigation
+        if mode == "hold_repeat":
+            if pressed:
+                await self._execute_action(press, key_index)
+                interval = press.get("hold_repeat_ms", 200) / 1000.0
+                self._hold_tasks[key_index] = self.api.create_periodic_task(
+                    lambda: self._execute_action(press, key_index),
+                    interval_seconds=interval,
+                    name=f"hold_repeat_{key_index}",
+                )
+            else:
+                task_id = self._hold_tasks.pop(key_index, None)
+                if task_id:
+                    self.api.cancel_task(task_id)
+            return
+
+        if mode == "toggle":
+            if not pressed:
+                return
+            # Toggle: track on/off state per button, alternate action
+            toggle_key = f"_toggle_{page}_{key_index}"
+            is_on = getattr(self, toggle_key, False)
+            if is_on and hold_binding:
+                # "hold" binding used as the "off" action for toggle
+                await self._execute_action(hold_binding, key_index)
+            else:
+                await self._execute_action(press, key_index)
+            setattr(self, toggle_key, not is_on)
+            return
+
+        if mode == "tap_hold":
+            threshold = press.get("hold_threshold_ms", 500) / 1000.0
+            if pressed:
+                self._press_times[key_index] = asyncio.get_event_loop().time()
+            else:
+                press_time = self._press_times.pop(key_index, 0)
+                held = asyncio.get_event_loop().time() - press_time
+                if held >= threshold and hold_binding:
+                    await self._execute_action(hold_binding, key_index)
+                else:
+                    await self._execute_action(press, key_index)
+            return
+
+        # Default: tap mode — fire on press only
+        if pressed:
+            await self._execute_action(press, key_index)
+
+    async def _execute_action(self, action_binding, key_index):
+        """Execute a single action binding (macro, device command, navigate)."""
+        action = action_binding.get("action", "")
+
         if action == "navigate":
-            page_id = press.get("page", "")
+            page_id = action_binding.get("page", "")
             if page_id == "__next_page__":
                 await self._change_page(self.current_page + 1)
             elif page_id == "__prev_page__":
                 await self._change_page(self.current_page - 1)
-            return
 
-        # Macro execution
-        if action == "macro":
-            macro = press.get("macro", "")
+        elif action == "macro":
+            macro = action_binding.get("macro", "")
             if macro:
                 try:
                     await self.api.macro_execute(macro)
                     self.api.log(f"Executed macro '{macro}' from key {key_index}", level="debug")
                 except Exception as e:
                     self.api.log(f"Error executing macro '{macro}': {e}", level="error")
-            return
 
-        # Device command
-        if action == "device.command":
-            device = press.get("device", "")
-            command = press.get("command", "")
-            params = press.get("params")
+        elif action == "device.command":
+            device = action_binding.get("device", "")
+            command = action_binding.get("command", "")
+            params = action_binding.get("params")
             if device and command:
                 try:
                     await self.api.device_command(device, command, params if isinstance(params, dict) else None)
                     self.api.log(f"Sent {command} to {device} from key {key_index}", level="debug")
                 except Exception as e:
                     self.api.log(f"Error sending command: {e}", level="error")
-            return
 
     # ──── Page Navigation ────
 
@@ -522,9 +565,16 @@ class StreamDeckPlugin:
                     if is_active and isinstance(style_active, dict):
                         bg_color = style_active.get("bg_color", bg_color)
                         text_color = style_active.get("text_color", text_color)
+                        # Conditional label (overrides static label)
+                        active_label = feedback.get("label_active", "")
+                        if active_label:
+                            label = active_label
                     elif not is_active and isinstance(style_inactive, dict):
                         bg_color = style_inactive.get("bg_color", bg_color) or default_bg
                         text_color = style_inactive.get("text_color", text_color) or default_text
+                        inactive_label = feedback.get("label_inactive", "")
+                        if inactive_label:
+                            label = inactive_label
 
         # Generate the button image
         image = self._create_button_image(label, bg_color, text_color)
