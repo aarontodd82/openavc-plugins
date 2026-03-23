@@ -51,13 +51,15 @@ Use the **Surface Configurator** in the Programmer IDE:
 | Mode | Behavior | Use Case |
 |------|----------|----------|
 | Tap | Fires action on press (default) | Most buttons |
-| Toggle | Alternates between press and hold actions each press | Power on/off, mute/unmute |
+| Toggle | Fires On or Off action based on current state | Power on/off, mute/unmute |
 | Hold Repeat | Fires action repeatedly while held (configurable interval) | Volume ramp, camera pan/tilt |
-| Tap / Hold | Short press = press action, long press = hold action | Quick vs advanced |
+| Tap / Hold | Short press = tap action, long press = long press action | Quick vs advanced |
 
-### Conditional Labels
+**Toggle** is state-aware. Pick a state key to watch, set the "on" value, and configure On Action and Off Action separately. The button reads the current state to decide which action to fire. Set **On Label** / **Off Label** to change the physical button text per state (e.g., "ON" when active, "OFF" when inactive).
 
-In the Visual Feedback section, set different label text for active and inactive states. For example, a power button shows "ON" (green) when the projector is on and "OFF" (dark) when off. The physical button image updates automatically.
+### Visual Feedback
+
+Separate from button modes, the Visual Feedback section lets you set state-driven colors and conditional labels. Use it for color changes on any button mode. Toggle has its own label fields built in, so you don't need Visual Feedback just for label changes on toggle buttons.
 
 ## State Keys
 
