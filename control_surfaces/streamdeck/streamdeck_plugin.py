@@ -433,21 +433,30 @@ class StreamDeckPlugin:
         if mode == "toggle":
             if not pressed:
                 return
-            # Toggle: read feedback state to determine on/off
+            # Toggle: read toggle_key state to determine on/off
             off_action = press.get("off_action")
+            toggle_key = press.get("toggle_key", "")
+            toggle_value = press.get("toggle_value")
             is_active = False
-            if feedback and isinstance(feedback, dict):
-                fk = feedback.get("key", "")
-                if fk:
-                    value = await self.api.state_get(fk)
-                    condition = feedback.get("condition", {})
-                    expected = condition.get("equals") if isinstance(condition, dict) else None
-                    is_active = (str(value).lower() == str(expected).lower()) if expected is not None else bool(value)
+            if toggle_key:
+                value = await self.api.state_get(toggle_key)
+                if toggle_value is not None:
+                    is_active = str(value).lower() == str(toggle_value).lower()
+                else:
+                    is_active = bool(value)
 
             if is_active and off_action and isinstance(off_action, dict):
                 await self._execute_action(off_action, key_index)
             else:
                 await self._execute_action(press, key_index)
+
+            # Update button label if on_label/off_label configured
+            on_label = press.get("on_label", "")
+            off_label = press.get("off_label", "")
+            if on_label or off_label:
+                # Re-render after action (state may have changed)
+                await asyncio.sleep(0.1)
+                await self._render_button(key_index)
             return
 
         if mode == "tap_hold":
@@ -544,8 +553,23 @@ class StreamDeckPlugin:
         if assignment:
             label = assignment.get("label", "")
 
-            # Read feedback from bindings (new) or legacy feedback_key
+            # Toggle mode: on_label/off_label override static label
             bindings = assignment.get("bindings", {})
+            press_binding = bindings.get("press") if isinstance(bindings, dict) else None
+            if press_binding and isinstance(press_binding, dict) and press_binding.get("mode") == "toggle":
+                tk = press_binding.get("toggle_key", "")
+                tv = press_binding.get("toggle_value")
+                if tk:
+                    tval = await self.api.state_get(tk)
+                    t_active = (str(tval).lower() == str(tv).lower()) if tv is not None else bool(tval)
+                    on_lbl = press_binding.get("on_label", "")
+                    off_lbl = press_binding.get("off_label", "")
+                    if t_active and on_lbl:
+                        label = on_lbl
+                    elif not t_active and off_lbl:
+                        label = off_lbl
+
+            # Read feedback from bindings (new) or legacy feedback_key
             feedback = bindings.get("feedback") if isinstance(bindings, dict) else None
 
             # Backward compat
