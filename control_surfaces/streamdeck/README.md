@@ -40,13 +40,24 @@ Use the **Surface Configurator** in the Programmer IDE:
 1. Open the **Stream Deck** view in the Plugins sidebar section
 2. Click a button on the visual grid
 3. In the assignment panel, set:
-   - **Macro** -- which macro to run when pressed
    - **Label** -- text displayed on the button
-   - **Feedback Key** -- a state key that controls the button's active appearance (e.g., `device.projector.power`)
+   - **Button Mode** -- how the button behaves (see below)
+   - **Press Action** -- what happens when pressed: run a macro, send a device command, set a variable, or navigate pages
+   - **Visual Feedback** -- pick a state key, set a condition, choose active/inactive colors and labels
 4. Use **page tabs** to set up multiple pages of buttons
 
-Special button actions:
-- **Next Page** / **Previous Page** -- navigate between button pages on the physical deck
+### Button Modes
+
+| Mode | Behavior | Use Case |
+|------|----------|----------|
+| Tap | Fires action on press (default) | Most buttons |
+| Toggle | Alternates between press and hold actions each press | Power on/off, mute/unmute |
+| Hold Repeat | Fires action repeatedly while held (configurable interval) | Volume ramp, camera pan/tilt |
+| Tap / Hold | Short press = press action, long press = hold action | Quick vs advanced |
+
+### Conditional Labels
+
+In the Visual Feedback section, set different label text for active and inactive states. For example, a power button shows "ON" (green) when the projector is on and "OFF" (dark) when off. The physical button image updates automatically.
 
 ## State Keys
 
@@ -63,8 +74,8 @@ Special button actions:
 | Event | Payload | Description |
 |-------|---------|-------------|
 | `plugin.streamdeck.connected` | `{model, serial}` | Deck connected |
-| `plugin.streamdeck.button.press` | `{key, row, col, page}` | Button pressed |
-| `plugin.streamdeck.button.release` | `{key, row, col, page}` | Button released |
+| `plugin.streamdeck.button.press` | `{key, page}` | Button pressed |
+| `plugin.streamdeck.button.release` | `{key, page}` | Button released |
 
 ## Context Actions
 
